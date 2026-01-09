@@ -359,6 +359,27 @@ inspector_port = 8083
 # The Deno major version to use.
 deno_version = 2
 
+# Edge Functions configuration
+# JWT verification is handled in function code using JWKS (new asymmetric keys)
+# instead of the deprecated verify_jwt infrastructure flag
+[functions.generate-evolution-ideas]
+verify_jwt = false
+
+[functions.generate-insights]
+verify_jwt = false
+
+[functions.analyze-quick-note]
+verify_jwt = false
+
+[functions.create-action-from-insight]
+verify_jwt = false
+
+[functions.update-client-stats]
+verify_jwt = false
+
+[functions.sync-entreprise-default]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 

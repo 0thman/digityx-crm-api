@@ -38,15 +38,10 @@ Deno.serve(async (req) => {
 
     const updates: Record<string, unknown> = {};
 
-    // Recalculer le CA total du client (lots payés + échéances récurrentes payées)
+    // Recalculer le CA total du client
+    // Sources: lots payés (sans échéances) + échéances de lots payées + échéances récurrentes payées
     if (update_type === "ca" || update_type === "all") {
-      // CA des lots (one-shot)
-      const { data: lots } = await supabase
-        .from("project_lots")
-        .select("montant_paye, project_id")
-        .eq("statut_facturation", "Payé");
-
-      // Filtrer les lots par client
+      // Récupérer les projets du client
       const { data: projects } = await supabase
         .from("projects")
         .select("id")
@@ -54,12 +49,48 @@ Deno.serve(async (req) => {
         .is("deleted_at", null);
 
       const projectIds = projects?.map((p) => p.id) || [];
-      const lotsCA =
+
+      // 1. CA des lots payés directement (lots sans échéances)
+      const { data: lots } = await supabase
+        .from("project_lots")
+        .select("id, montant_paye, project_id")
+        .in("project_id", projectIds)
+        .eq("statut_facturation", "Payé");
+
+      // Récupérer les lots qui ont des échéances (pour les exclure du calcul direct)
+      const { data: lotEcheances } = await supabase
+        .from("project_lot_echeances")
+        .select("lot_id")
+        .in(
+          "lot_id",
+          lots?.map((l) => l.id) || []
+        );
+
+      const lotsWithEcheances = new Set(lotEcheances?.map((e) => e.lot_id) || []);
+
+      const lotsDirectCA =
         lots
-          ?.filter((l) => projectIds.includes(l.project_id))
+          ?.filter((l) => !lotsWithEcheances.has(l.id))
           .reduce((sum, l) => sum + (l.montant_paye || 0), 0) || 0;
 
-      // CA des échéances récurrentes
+      // 2. CA des échéances de lots payées
+      const { data: allLots } = await supabase
+        .from("project_lots")
+        .select("id")
+        .in("project_id", projectIds);
+
+      const allLotIds = allLots?.map((l) => l.id) || [];
+
+      const { data: paidLotEcheances } = await supabase
+        .from("project_lot_echeances")
+        .select("montant_ht")
+        .in("lot_id", allLotIds)
+        .eq("statut_facturation", "Payé");
+
+      const lotEcheancesCA =
+        paidLotEcheances?.reduce((sum, e) => sum + (e.montant_ht || 0), 0) || 0;
+
+      // 3. CA des échéances récurrentes payées
       const { data: recurrents } = await supabase
         .from("project_recurrents")
         .select("id")
@@ -67,16 +98,16 @@ Deno.serve(async (req) => {
 
       const recurrentIds = recurrents?.map((r) => r.id) || [];
 
-      const { data: echeances } = await supabase
+      const { data: paidRecurrentEcheances } = await supabase
         .from("project_recurrent_echeances")
         .select("montant_ht")
         .in("recurrent_id", recurrentIds)
         .eq("statut_facturation", "Payé");
 
       const recurrentCA =
-        echeances?.reduce((sum, e) => sum + (e.montant_ht || 0), 0) || 0;
+        paidRecurrentEcheances?.reduce((sum, e) => sum + (e.montant_ht || 0), 0) || 0;
 
-      updates.ca_total_genere = lotsCA + recurrentCA;
+      updates.ca_total_genere = lotsDirectCA + lotEcheancesCA + recurrentCA;
     }
 
     // Mettre à jour la date du dernier contact
