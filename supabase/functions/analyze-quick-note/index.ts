@@ -55,20 +55,23 @@ interface IdeaSuggestion {
 
 type SuggestedData = InteractionSuggestion | ActionSuggestion | IdeaSuggestion;
 
+interface SuggestedItem {
+  type: "interaction" | "action" | "idea";
+  confidence: number;
+  reasoning: string;
+  data: SuggestedData;
+}
+
 interface AnalyzeResponse {
   success: boolean;
-  classification: {
-    type: "interaction" | "action" | "idea";
-    confidence: number;
-    reasoning: string;
-  };
-  suggested_data: SuggestedData;
+  items: SuggestedItem[];
 }
 
 // Prompt système pour la classification
 const SYSTEM_PROMPT = `Tu es un assistant CRM intelligent pour Digityx Studios, une agence de développement Fullstack et IA.
 
-Ton rôle est d'analyser une note rapide saisie par l'utilisateur et de déterminer automatiquement quel type d'élément CRM créer.
+Ton rôle est d'analyser une note rapide saisie par l'utilisateur et d'extraire TOUS les éléments CRM distincts qu'elle contient.
+Une note peut contenir plusieurs interactions, plusieurs actions et/ou plusieurs idées. Tu dois les identifier et les séparer.
 
 ### TYPES D'ÉLÉMENTS :
 
@@ -93,18 +96,21 @@ Ton rôle est d'analyser une note rapide saisie par l'utilisateur et de détermi
 - Une action est toujours orientée futur
 - Une idée est une proposition d'amélioration ou d'opportunité commerciale
 - En cas de doute entre action et idée, favorise ACTION si c'est une tâche concrète à réaliser
+- IMPORTANT : Si la note contient plusieurs éléments distincts, crée un item pour CHAQUE élément
 
 ### FORMAT DE SORTIE (JSON strict) :
 {
-  "type": "interaction" | "action" | "idea",
-  "confidence": nombre_0_100,
-  "reasoning": "Explication courte de pourquoi ce type a été choisi",
-  "data": {
-    // Champs pré-remplis selon le type (voir ci-dessous)
-  }
+  "items": [
+    {
+      "type": "interaction" | "action" | "idea",
+      "confidence": nombre_0_100,
+      "reasoning": "Explication courte de pourquoi ce type a été choisi",
+      "data": { ... }
+    }
+  ]
 }
 
-Pour INTERACTION :
+Pour chaque INTERACTION dans data :
 {
   "type": "interaction",
   "date": "YYYY-MM-DD",
@@ -114,7 +120,7 @@ Pour INTERACTION :
   "actions_suivantes": "Si mentionnées dans la note, sinon null"
 }
 
-Pour ACTION :
+Pour chaque ACTION dans data :
 {
   "type": "action",
   "titre": "Titre de l'action (max 60 caractères)",
@@ -124,7 +130,7 @@ Pour ACTION :
   "date_echeance": "YYYY-MM-DD ou null si non mentionnée"
 }
 
-Pour IDÉE :
+Pour chaque IDÉE dans data :
 {
   "type": "idea",
   "titre": "Titre de l'idée (max 60 caractères)",
@@ -134,7 +140,15 @@ Pour IDÉE :
   "impact_client": "Faible|Moyen|Fort",
   "estimation_montant": nombre_ou_null,
   "estimation_jours": nombre_ou_null
-}`;
+}
+
+### EXEMPLES :
+
+Note: "Appel avec Pierre ce matin, il veut un chatbot. Lui envoyer un devis demain."
+→ 2 items : 1 interaction (l'appel passé) + 1 action (envoyer le devis)
+
+Note: "Réunion avec l'équipe. On pourrait ajouter un dashboard analytics et aussi une API publique."
+→ 3 items : 1 interaction (la réunion) + 2 idées (dashboard + API)`;
 
 // Utilitaire pour parser le JSON de Claude
 function parseClaudeJSON(rawText: string): Record<string, unknown> | null {
@@ -250,7 +264,7 @@ Analyse cette note et détermine le type d'élément CRM à créer.
     // Appeler Claude
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 800,
+      max_tokens: 2000,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userMessage }],
     });
@@ -265,61 +279,82 @@ Analyse cette note et détermine le type d'élément CRM à créer.
       throw new Error("Failed to parse Claude response");
     }
 
-    // Construire la réponse structurée
-    const classificationType = result.type as "interaction" | "action" | "idea";
-    const data = result.data as Record<string, unknown>;
+    // Parser les items du résultat
+    const rawItems = (result.items as Array<Record<string, unknown>>) || [];
 
-    let suggestedData: SuggestedData;
+    // Si Claude retourne l'ancien format (un seul item), le convertir
+    if (rawItems.length === 0 && result.type) {
+      rawItems.push({
+        type: result.type,
+        confidence: result.confidence || 80,
+        reasoning: result.reasoning || "",
+        data: result.data || {},
+      });
+    }
 
-    switch (classificationType) {
-      case "interaction":
-        suggestedData = {
-          type: "interaction",
-          date: (data.date as string) || getTodayDate(),
-          interaction_type: (data.interaction_type as string) || "Autre",
-          sujet: (data.sujet as string) || "",
-          notes: (data.notes as string) || body.note,
-          actions_suivantes: (data.actions_suivantes as string) || undefined,
-        };
-        break;
+    // Construire les items structurés
+    const suggestedItems: SuggestedItem[] = rawItems.map((item) => {
+      const itemType = item.type as "interaction" | "action" | "idea";
+      const data = item.data as Record<string, unknown>;
 
-      case "action":
-        suggestedData = {
-          type: "action",
-          titre: (data.titre as string) || "",
-          description: (data.description as string) || body.note,
-          action_type: (data.action_type as string) || "Autre",
-          priorite: (data.priorite as string) || "Moyenne",
-          date_echeance:
-            (data.date_echeance as string) || getDefaultDueDate(),
-        };
-        break;
+      let suggestedData: SuggestedData;
 
-      case "idea":
-        suggestedData = {
-          type: "idea",
-          titre: (data.titre as string) || "",
-          description: (data.description as string) || body.note,
-          categorie: (data.categorie as string) || "Autre",
-          priorite: (data.priorite as string) || "Moyenne",
-          impact_client: (data.impact_client as string) || "Moyen",
-          estimation_montant: (data.estimation_montant as number) || undefined,
-          estimation_jours: (data.estimation_jours as number) || undefined,
-        };
-        break;
+      switch (itemType) {
+        case "interaction":
+          suggestedData = {
+            type: "interaction",
+            date: (data.date as string) || getTodayDate(),
+            interaction_type: (data.interaction_type as string) || "Autre",
+            sujet: (data.sujet as string) || "",
+            notes: (data.notes as string) || body.note,
+            actions_suivantes: (data.actions_suivantes as string) || undefined,
+          };
+          break;
 
-      default:
-        throw new Error(`Unknown classification type: ${classificationType}`);
+        case "action":
+          suggestedData = {
+            type: "action",
+            titre: (data.titre as string) || "",
+            description: (data.description as string) || body.note,
+            action_type: (data.action_type as string) || "Autre",
+            priorite: (data.priorite as string) || "Moyenne",
+            date_echeance:
+              (data.date_echeance as string) || getDefaultDueDate(),
+          };
+          break;
+
+        case "idea":
+          suggestedData = {
+            type: "idea",
+            titre: (data.titre as string) || "",
+            description: (data.description as string) || body.note,
+            categorie: (data.categorie as string) || "Autre",
+            priorite: (data.priorite as string) || "Moyenne",
+            impact_client: (data.impact_client as string) || "Moyen",
+            estimation_montant: (data.estimation_montant as number) || undefined,
+            estimation_jours: (data.estimation_jours as number) || undefined,
+          };
+          break;
+
+        default:
+          throw new Error(`Unknown classification type: ${itemType}`);
+      }
+
+      return {
+        type: itemType,
+        confidence: (item.confidence as number) || 80,
+        reasoning: (item.reasoning as string) || "",
+        data: suggestedData,
+      };
+    });
+
+    if (suggestedItems.length === 0) {
+      throw new Error("No items extracted from the note");
     }
 
     const analyzeResponse: AnalyzeResponse = {
       success: true,
-      classification: {
-        type: classificationType,
-        confidence: (result.confidence as number) || 80,
-        reasoning: (result.reasoning as string) || "",
-      },
-      suggested_data: suggestedData,
+      items: suggestedItems,
     };
 
     return new Response(JSON.stringify(analyzeResponse), {

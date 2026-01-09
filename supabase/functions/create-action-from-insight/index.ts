@@ -21,6 +21,7 @@ interface CreateActionFromInsightRequest {
 
 // Mapping des types d'insights vers les types d'actions
 const TYPE_MAPPING: Record<string, string> = {
+  // Types existants
   "Contact oublié": "Check-in",
   "Moment recommandation": "Demande recommandation",
   "Opportunité extension": "Proposition commerciale",
@@ -29,6 +30,11 @@ const TYPE_MAPPING: Record<string, string> = {
   "Upsell détecté": "Proposition commerciale",
   "Risque churn": "Check-in",
   "Tendance identifiée": "Autre",
+  // Nouveaux types IA
+  "Timing upsell": "Proposition commerciale",
+  "Stratégie contenu": "Autre",
+  "Amélioration process": "Autre",
+  "Optimisation pricing": "Autre",
 };
 
 Deno.serve(async (req) => {
